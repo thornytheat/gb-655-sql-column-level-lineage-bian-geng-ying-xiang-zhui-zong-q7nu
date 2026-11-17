@@ -56,7 +56,29 @@ CREATE TABLE IF NOT EXISTS kv (
     k TEXT PRIMARY KEY,
     v TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS handoffs (
+    handoff_id    TEXT PRIMARY KEY,
+    run_id        TEXT NOT NULL,
+    revision      INTEGER NOT NULL,
+    status        TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    payload_json  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS handoff_journal (
+    journal_id    TEXT PRIMARY KEY,
+    handoff_id    TEXT NOT NULL,
+    op            TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    before_json   TEXT NOT NULL,
+    after_json    TEXT,
+    created_at    TEXT NOT NULL,
+    finished_at   TEXT,
+    note          TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_quarantine_schema ON quarantine(schema_id);
+CREATE INDEX IF NOT EXISTS idx_handoffs_run ON handoffs(run_id);
+CREATE INDEX IF NOT EXISTS idx_handoff_journal_open ON handoff_journal(handoff_id, status);
 """
 
 
@@ -83,7 +105,8 @@ def reset() -> None:
     """测试与重建用：清空全部业务表。"""
     with _LOCK, _connect() as conn:
         conn.executescript(SCHEMA)
-        for table in ("snapshots", "runs", "quarantine", "kv"):
+        for table in ("snapshots", "runs", "quarantine", "kv",
+                      "handoffs", "handoff_journal"):
             conn.execute(f"DELETE FROM {table}")
 
 
@@ -272,3 +295,131 @@ def get_kv(key: str, default=None):
     with _LOCK, _connect() as conn:
         row = conn.execute("SELECT v FROM kv WHERE k=?", (key,)).fetchone()
     return _loads(row["v"]) if row else default
+
+
+# ---------- 执行交接 ----------
+#
+# revision 是乐观锁：读到的版本与写入时的版本不一致就拒绝，保证并发撤回 / 领取
+# 只有一方生效。journal 是写前日志：先记意图，再改交接单，最后登记完成；
+# 进程在任一步中断，恢复时按 revision 判断意图是否已经落地。
+
+def insert_handoff(payload: dict) -> bool:
+    """一次性插入；同一 run 只允许一张交接单，重复创建返回 False。"""
+    with _LOCK, _connect() as conn:
+        cursor = conn.execute(
+            """INSERT OR IGNORE INTO handoffs
+                   (handoff_id, run_id, revision, status, created_at, updated_at,
+                    payload_json)
+               VALUES (?,?,?,?,?,?,?)""",
+            (
+                payload["handoff_id"], payload["run_id"], int(payload["revision"]),
+                payload["status"], payload["created_at"], payload["updated_at"],
+                _dumps(payload),
+            ),
+        )
+        return cursor.rowcount == 1
+
+
+def get_handoff(handoff_id: str) -> dict | None:
+    with _LOCK, _connect() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM handoffs WHERE handoff_id=?", (handoff_id,)
+        ).fetchone()
+    return _loads(row["payload_json"]) if row else None
+
+
+def find_handoff_by_run(run_id: str) -> dict | None:
+    with _LOCK, _connect() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM handoffs WHERE run_id=?", (run_id,)
+        ).fetchone()
+    return _loads(row["payload_json"]) if row else None
+
+
+def list_handoffs(limit: int = 30) -> list[dict]:
+    with _LOCK, _connect() as conn:
+        rows = conn.execute(
+            """SELECT payload_json FROM handoffs
+               ORDER BY created_at DESC, handoff_id LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    return [_loads(row["payload_json"]) for row in rows]
+
+
+def cas_handoff(handoff_id: str, expected_revision: int, payload: dict) -> bool:
+    """比较并交换：只有库里的 revision 仍等于 expected 时才写入。"""
+    with _LOCK, _connect() as conn:
+        cursor = conn.execute(
+            """UPDATE handoffs
+                  SET revision=?, status=?, updated_at=?, payload_json=?
+                WHERE handoff_id=? AND revision=?""",
+            (
+                int(payload["revision"]), payload["status"], payload["updated_at"],
+                _dumps(payload), handoff_id, int(expected_revision),
+            ),
+        )
+        return cursor.rowcount == 1
+
+
+def journal_begin(journal_id: str, handoff_id: str, op: str,
+                  before: dict, after: dict, created_at: str) -> None:
+    with _LOCK, _connect() as conn:
+        conn.execute(
+            """INSERT INTO handoff_journal
+                   (journal_id, handoff_id, op, status, before_json, after_json,
+                    created_at, finished_at, note)
+               VALUES (?,?,?,?,?,?,?,NULL,NULL)
+               ON CONFLICT(journal_id) DO UPDATE SET
+                   handoff_id=excluded.handoff_id,
+                   op=excluded.op,
+                   status=excluded.status,
+                   before_json=excluded.before_json,
+                   after_json=excluded.after_json,
+                   created_at=excluded.created_at,
+                   finished_at=NULL,
+                   note=NULL""",
+            (journal_id, handoff_id, op, "pending", _dumps(before), _dumps(after),
+             created_at),
+        )
+
+
+def journal_finish(journal_id: str, status: str, finished_at: str,
+                   note: str | None = None) -> None:
+    with _LOCK, _connect() as conn:
+        conn.execute(
+            """UPDATE handoff_journal
+                  SET status=?, finished_at=?, note=?
+                WHERE journal_id=?""",
+            (status, finished_at, note, journal_id),
+        )
+
+
+def get_journal(journal_id: str) -> dict | None:
+    with _LOCK, _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM handoff_journal WHERE journal_id=?", (journal_id,)
+        ).fetchone()
+    if row is None:
+        return None
+    item = dict(row)
+    item["before"] = _loads(item.pop("before_json"))
+    item["after"] = _loads(item.pop("after_json"))
+    return item
+
+
+def open_journals(handoff_id: str | None = None) -> list[dict]:
+    query = "SELECT * FROM handoff_journal WHERE status='pending'"
+    args: tuple = ()
+    if handoff_id:
+        query += " AND handoff_id=?"
+        args = (handoff_id,)
+    query += " ORDER BY created_at, journal_id"
+    with _LOCK, _connect() as conn:
+        rows = conn.execute(query, args).fetchall()
+    out = []
+    for row in rows:
+        item = dict(row)
+        item["before"] = _loads(item.pop("before_json"))
+        item["after"] = _loads(item.pop("after_json"))
+        out.append(item)
+    return out

@@ -77,3 +77,24 @@
 - 列定义行 = 接受字段 + 阻断行
 
 每个字段只进一个桶，所以四个等式成立是必要条件；差额不为 0 即判定漏项。
+
+## 9 执行交接
+
+- `handoff_id`：交接单身份，由批次 `run_id` 派生，一个批次只有一张。
+- `revision`：交接单版本号，每次写账 +1；领取与撤回必须带 `expected_revision`。
+- `task_id`：任务身份，由 `handoff_id` 与下游节点名派生，重复生成不变。
+- `manifest_sha256`：交接清单摘要，清单 = 批次身份 + 逐任务结构与任务摘要，不含状态。
+- `manifest_sha256`（任务级）：`{task_id, consumer, kind, structure}` 的摘要，凭据绑定它。
+- `credential.token`：领取凭据明文，只在签发时返回一次；库里只留 `token_sha256`。
+- `credential.expires_at`：凭据到期时间（UTC）；过期后回执记 `CREDENTIAL_EXPIRED`。
+- 任务状态：`pending` 待领、`claimed` 在途、`executed` 已执行、`cancelled` 已取消、
+  `compensation_pending` 待补偿、`compensation_claimed` 补偿在途、`completed` 完成。
+- 任务分组：待领 = `pending`；在途 = `claimed` + `compensation_claimed`；
+  待补偿 = `compensation_pending`；完成 = `executed` + `cancelled` + `completed`。
+- `rollback.complete`：撤回后每个任务都落在 `cancelled` 或 `completed` 才为真；
+  已执行但未补偿确认的项计入 `executed_without_compensation`，不算回退完成。
+- 冲突回执：`conflict.code` 取值 `CREDENTIAL_INVALID`、`CREDENTIAL_PURPOSE`、
+  `CREDENTIAL_MANIFEST_MISMATCH`、`CREDENTIAL_SUPERSEDED`、`CREDENTIAL_EXPIRED`、
+  `RECEIPT_STATE`、`IDEMPOTENCY_CONFLICT`；冲突只登记，不推进状态、不抵销补偿。
+- `journal`：写前日志，状态 `pending` 是待办；恢复时比对 `before` / `after` 摘要，
+  已落地记 `applied` 不重放，未落地补写一次，两边都不是记 `diverged`。

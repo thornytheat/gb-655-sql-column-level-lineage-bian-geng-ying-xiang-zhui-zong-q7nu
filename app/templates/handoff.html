@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}执行交接 · lineageguard{% endblock %}
+{% block body %}
+<section class="doc-section">
+  <h1>执行交接</h1>
+  {% if empty or not current %}
+  <p class="empty">还没有批次，先在版本历史页跑一次。</p>
+  {% else %}
+  <p class="lede" data-handoff-id="{{ current.handoff_id }}">
+    交接单 <span class="mono">{{ current.handoff_id }}</span>
+    批次 <span class="mono">{{ current.run_id }}</span>
+    版本 <span class="mono">{{ current.version_label_old }} → {{ current.version_label_new }}</span>
+    修订 <span class="mono" data-revision>{{ current.revision }}</span>
+    状态 <span class="st {{ 'st-bad' if current.status == 'recalled' else 'st-ok' }}" data-handoff-status>{{ current.status }}</span>
+  </p>
+  <div class="actions">
+    <button type="button" data-action="handoff-recall" data-expected="{{ current.revision }}">撤回整单</button>
+    <a class="btn ghost" href="/api/handoffs/{{ current.handoff_id }}/manifest.json">清单 JSON</a>
+    <a class="btn ghost" href="/api/handoffs/{{ current.handoff_id }}/todos">待办 JSON</a>
+    <span class="flash" data-flash></span>
+  </div>
+  {% endif %}
+</section>
+
+{% if current %}
+<section class="doc-section">
+  <h2><span class="clause">2</span>批次回读</h2>
+  <dl class="ledger">
+    <div><dt>任务</dt><dd>{{ current.counts.total }}<span class="unit">条</span></dd></div>
+    <div><dt>待领</dt><dd>{{ current.counts.groups.pending }}<span class="unit">条</span></dd></div>
+    <div><dt>在途</dt><dd>{{ current.counts.groups.in_flight }}<span class="unit">条</span></dd></div>
+    <div><dt>待补偿</dt><dd>{{ current.counts.groups.pending_compensation }}<span class="unit">条</span></dd></div>
+    <div><dt>完成</dt><dd>{{ current.counts.groups.completed }}<span class="unit">条</span></dd></div>
+    <div><dt>已结算</dt><dd>{{ current.rollback.settled }}/{{ current.rollback.total }}<span class="unit">条</span></dd></div>
+    <div><dt>回退完成</dt><dd>{% if current.rollback.complete %}<span class="st st-ok">是</span>{% elif current.rollback.required %}<span class="st st-bad">否</span>{% else %}<span class="st st-none">未撤回</span>{% endif %}</dd></div>
+    <div><dt>冲突回执</dt><dd>{{ current.conflicts|length }}<span class="unit">条</span></dd></div>
+  </dl>
+</section>
+
+{% for group, label in [('pending', '待领'), ('in_flight', '在途'), ('pending_compensation', '待补偿'), ('completed', '完成')] %}
+<section class="doc-section">
+  <h2><span class="clause">3</span>{{ label }}</h2>
+  {% set rows = current.groups[group] %}
+  {% if rows %}
+  <div class="wrap-scroll">
+    <table>
+      <thead>
+        <tr><th>任务</th><th>下游</th><th>状态</th><th class="num">深度</th><th>凭据</th><th>动作</th></tr>
+      </thead>
+      <tbody>
+        {% for task in rows %}
+        <tr>
+          <td class="name">{{ task.task_id }}</td>
+          <td class="name">{{ task.consumer }}</td>
+          <td>{{ task.status }}</td>
+          <td class="num">{{ task.structure.depth if task.structure.depth is not none else '—' }}</td>
+          <td class="reason">
+            {% if task.credential %}{{ task.credential.expires_at }}
+            {% elif task.compensation and task.compensation.credential %}{{ task.compensation.credential.expires_at }}
+            {% else %}—{% endif %}
+          </td>
+          <td class="reason">
+            {% if task.status == 'pending' %}
+            <button type="button" data-action="handoff-claim" data-task="{{ task.task_id }}" data-purpose="execute" data-expected="{{ current.revision }}">领取</button>
+            {% elif task.status == 'claimed' %}
+            <button type="button" data-action="handoff-receipt" data-task="{{ task.task_id }}" data-purpose="execute" data-outcome="executed">已执行</button>
+            <button type="button" class="ghost" data-action="handoff-receipt" data-task="{{ task.task_id }}" data-purpose="execute" data-outcome="not_executed">未执行</button>
+            {% elif task.status == 'compensation_pending' %}
+            <button type="button" data-action="handoff-claim" data-task="{{ task.task_id }}" data-purpose="compensate" data-expected="{{ current.revision }}">领取补偿</button>
+            {% elif task.status == 'compensation_claimed' %}
+            <button type="button" data-action="handoff-receipt" data-task="{{ task.task_id }}" data-purpose="compensate" data-outcome="done">补偿完成</button>
+            <button type="button" class="ghost" data-action="handoff-receipt" data-task="{{ task.task_id }}" data-purpose="compensate" data-outcome="failed">补偿失败</button>
+            {% else %}—{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">没有。</p>
+  {% endif %}
+</section>
+{% endfor %}
+
+<section class="doc-section">
+  <h2><span class="clause">4</span>下游实际结构</h2>
+  {% if current.downstream %}
+  <table>
+    <caption>回读批次解析结果，不重算血缘<sup class="fn">1</sup></caption>
+    <thead><tr><th>下游</th><th>类型</th><th>引用</th><th>解析</th></tr></thead>
+    <tbody>
+      {% for item in current.downstream %}
+      {% for ref in item.structure.refs %}
+      <tr>
+        <td class="name">{{ item.consumer }}</td>
+        <td>{{ item.kind }}</td>
+        <td class="name">{{ ref.ref }}</td>
+        <td class="reason">{% if ref.resolved %}{{ ref.new_name }}（{{ ref.via }}）{% else %}断链（{{ ref.via }}）{% endif %}</td>
+      </tr>
+      {% endfor %}
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">批次里没有受影响下游。</p>
+  {% endif %}
+</section>
+
+<section class="doc-section">
+  <h2><span class="clause">5</span>冲突回执</h2>
+  {% if current.conflicts %}
+  <table>
+    <thead><tr><th>任务</th><th>原因</th><th>明细</th></tr></thead>
+    <tbody>
+      {% for item in current.conflicts %}
+      <tr><td class="name">{{ item.task_id or '—' }}</td><td class="reason">{{ item.code }}</td><td>{{ item.detail }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">没有冲突。</p>
+  {% endif %}
+</section>
+
+<aside class="notes">
+  <ol class="footnotes">
+    <li>下游结构直接取批次里已有的引用解析结果，不重新判定血缘。<a class="back" href="#main">↩</a></li>
+  </ol>
+</aside>
+{% endif %}
+{% endblock %}

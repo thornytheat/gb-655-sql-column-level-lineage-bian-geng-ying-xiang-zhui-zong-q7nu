@@ -1,6 +1,6 @@
 # 深度登记 lineageguard
 
-- 规模：中型（7 个功能模块，76 个文件，65 条测试）
+- 规模：中型（8 个功能模块，97 个文件，134 条测试）
 - 核心规则：SQL 别名源列先解析成列级边，依赖图通过环检测后再计算反向影响闭包。
 - 使用者与工作流：数仓开发在列改名或删除前，复核受影响的模型、任务与报表。
 
@@ -15,6 +15,7 @@
 | M5 影响面 | 解析列级边并查看下游影响、环、断链 | POST /api/lineage | `app/modules/m5_impact/handler.py` `app/modules/m5_impact/sql_lineage.py` `app/modules/m5_impact/closure.py` `app/modules/m5_impact/cycle.py` `app/modules/m5_impact/broken.py` | `tests/test_m5_impact.py` `tests/test_sql_lineage.py` |
 | M6 版本批次 | 跑批次、看历史、验陈旧拒绝与区间重叠 | POST /api/runs | `app/modules/m6_batches/handler.py` `app/modules/m6_batches/service.py` `app/modules/m6_batches/window.py` `app/modules/m6_batches/guard.py` `app/modules/m6_batches/history.py` | `tests/test_m6_batches.py` |
 | M7 迁移单 | 出带列级证据的单一迁移清单 | GET /api/export/evidence.csv | `app/modules/m7_migration/handler.py` `app/modules/m7_migration/service.py` `app/modules/m7_migration/csv_out.py` `app/modules/m7_migration/ledger.py` | `tests/test_m7_migration.py` |
+| M8 执行交接 | 从批次生成逐下游任务，领取凭据、回执登记、撤回与补偿 | POST /api/handoffs | `app/modules/m8_handoff/handler.py` `app/modules/m8_handoff/service.py` `app/modules/m8_handoff/spec.py` | `tests/test_m8_handoff.py` `tests/test_m8_handoff_http.py` |
 
 ## 陷阱登记
 
@@ -30,6 +31,10 @@
 | TRAP-22 | 同一字段被连续改过两次名 | 只认最近一跳，最早的名字解析不到 | 跨版本改名链一路解析到底 | `app/modules/m4_mapping/rename.py` | `tests/test_m4_mapping.py::test_trap22_alias_chain_resolves_multi_hop` |
 | TRAP-25 | 两个版本生效区间重叠 | 取到哪版看运气 | 半开区间比较，重叠直接标记警告 | `app/modules/m6_batches/window.py` | `tests/test_m6_batches.py::test_trap25_overlap_flagged_but_adjacent_clean` |
 | TRAP-26 | 基于旧版本号提交 | 后提交无条件覆盖新结果 | 版本号乐观锁，基线落后即 409 | `app/modules/m6_batches/guard.py` | `tests/test_m6_batches.py::test_trap26_stale_submission_rejected` |
+| TRAP-31 | 撤回整单后已执行的下游仍按新结构运行 | 直接撤销整单，虚报回退完成 | 已执行项生成补偿任务，补偿回执确认才结算 | `app/modules/m8_handoff/service.py` | `tests/test_m8_handoff.py::test_executed_task_generates_compensation_after_recall` |
+| TRAP-32 | 撤回与领取并发，两者都基于同一旧版本 | 撤回后仍把任务派发出去 | 交接单 revision 乐观锁，落后即 409，撤回取消待领项 | `app/modules/m8_handoff/service.py` | `tests/test_m8_handoff.py::test_claim_and_recall_race_keeps_one_winner` |
+| TRAP-33 | 凭据到期后回执才到达，或凭据被重新签发覆盖 | 用过期的回执抵销补偿，虚报完成 | 回执凭据绑清单摘要与到期时间，过期 / 被覆盖留作冲突 | `app/modules/m8_handoff/service.py` | `tests/test_m8_handoff.py::test_expired_credential_receipt_is_conflict_and_does_not_settle` |
+| TRAP-34 | 写账中途进程退出，或客户端重试同一动作 | 重复派发任务、重复登记回执 | 先落日志再比较交换 revision，恢复补完待办，幂等键取回首果 | `app/modules/m8_handoff/service.py` | `tests/test_m8_handoff.py::test_interrupted_write_is_completed_on_recovery` `tests/test_m8_handoff.py::test_receipt_with_idempotency_key_is_not_double_counted` |
 
 ## 对账规则
 
@@ -45,4 +50,5 @@
 - DDL 只解析 `CREATE TABLE` 的列定义，不处理分区、约束、索引与 `ALTER`。
 - 类型格只覆盖数值、字符、时间、布尔四族；映射表、数组、结构体一律算 `unknown`，保守判破坏。
 - 生效区间重叠只标记不阻断，最终以版本序号为准。
+- 执行交接只回读批次里已有的影响面与引用解析，不重新判定血缘；补偿任务只登记回执，不代执行下游补偿脚本。
 - 打印页脚用 `counter(page)`，Chrome 打印预览不渲染该计数。

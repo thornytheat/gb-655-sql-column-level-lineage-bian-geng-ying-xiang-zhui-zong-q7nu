@@ -1,4 +1,28 @@
 /* 表单与请求：动作集中在 ACTIONS 里，失败必须写到页面上 */
+const HANDOFF_CREDENTIALS = {
+  // 领取到的凭据只放在本标签页的会话存储里：刷新还在，换标签页就重新领取。
+  get(taskId, purpose) {
+    try {
+      return JSON.parse(sessionStorage.getItem(`hg:${handoffId()}:${taskId}:${purpose}`));
+    } catch (error) {
+      return null;
+    }
+  },
+  set(taskId, purpose, credential) {
+    try {
+      sessionStorage.setItem(`hg:${handoffId()}:${taskId}:${purpose}`,
+        JSON.stringify(credential));
+    } catch (error) {
+      /* 存储被禁用时只是刷新后要重新领取 */
+    }
+  },
+};
+
+function handoffId() {
+  const node = document.querySelector('[data-handoff-id]');
+  return node ? node.dataset.handoffId : '';
+}
+
 const ACTIONS = {
   async import() {
     return request('/api/schemas/import', {
@@ -30,6 +54,41 @@ const ACTIONS = {
       target.textContent = `${result.old.norm} → ${result.new.norm}　${result.change}${detail}　${result.breaking ? '破坏' : '兼容'}`;
     }
     return `比较完成 ${result.change}`;
+  },
+
+  async 'handoff-recall'(button) {
+    const body = { expected_revision: Number(button.dataset.expected) };
+    const result = await request(`/api/handoffs/${handoffId()}/recall`, body);
+    return `已撤回，版本 ${result.revision}，待结算 ${result.rollback.outstanding.length} 条`;
+  },
+
+  async 'handoff-claim'(button) {
+    const purpose = button.dataset.purpose || 'execute';
+    const body = {
+      expected_revision: Number(button.dataset.expected),
+      purpose,
+    };
+    const result = await request(
+      `/api/handoffs/${handoffId()}/tasks/${button.dataset.task}/claim`, body);
+    HANDOFF_CREDENTIALS.set(result.task_id, purpose, result.credential);
+    return `已领取 ${result.task_id}，${result.credential.expires_at} 前有效`;
+  },
+
+  async 'handoff-receipt'(button) {
+    const purpose = button.dataset.purpose || 'execute';
+    const credential = HANDOFF_CREDENTIALS.get(button.dataset.task, purpose);
+    if (!credential) {
+      throw new Error('本页没有该任务的凭据，先领取再回执');
+    }
+    const result = await request(
+      `/api/handoffs/${handoffId()}/tasks/${button.dataset.task}/receipt`, {
+        credential,
+        outcome: button.dataset.outcome,
+      });
+    if (result.accepted === false && result.conflict) {
+      throw new Error(`回执留作冲突：${result.conflict.code}`);
+    }
+    return `回执已登记，任务 ${result.status}`;
   },
 };
 
@@ -72,7 +131,7 @@ document.addEventListener('click', async (event) => {
   try {
     const message = await handler(button);
     flash(target, message || '完成', false);
-    if (name === 'run') {
+    if (name === 'run' || name.startsWith('handoff-')) {
       setTimeout(() => window.location.reload(), 400);
     }
   } catch (error) {

@@ -48,6 +48,30 @@ class Conflict(FieldmapError):
     label = "记录冲突"
 
 
+class HandoffStale(FieldmapError):
+    """交接单的批次修订号落后：撤回或领取带的是旧版本。"""
+
+    status = 409
+    code = "HANDOFF_STALE"
+    label = "交接版本过期"
+
+
+class HandoffConflict(FieldmapError):
+    """交接状态不允许当前动作，或回执凭据失效。"""
+
+    status = 409
+    code = "HANDOFF_CONFLICT"
+    label = "交接冲突"
+
+
+class HandoffClosed(FieldmapError):
+    """整单已撤回，不再接受新派发或新领取。"""
+
+    status = 409
+    code = "HANDOFF_RECALLED"
+    label = "整单已撤回"
+
+
 def install(app: FastAPI) -> None:
     @app.exception_handler(FieldmapError)
     async def _handle_domain(_: Request, exc: FieldmapError) -> JSONResponse:

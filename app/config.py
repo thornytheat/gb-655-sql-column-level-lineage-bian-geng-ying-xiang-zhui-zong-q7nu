@@ -95,6 +95,11 @@ WINDOW_SEMANTICS = "[start, end)"
 # 影响面最多展开层数，防止异常登记把页面拖死
 MAX_IMPACT_DEPTH = 8
 
+# 执行交接：领取凭据默认有效期（秒），单次可覆盖但不得越界
+HANDOFF_CREDENTIAL_TTL = int(os.environ.get("LINEAGEGUARD_HANDOFF_TTL", "3600"))
+HANDOFF_CREDENTIAL_TTL_MIN = 1
+HANDOFF_CREDENTIAL_TTL_MAX = 86400
+
 
 def resolve_sample(name: str) -> Path:
     """把样例文件名限定在 sample_data/ 内，拒绝穿越与绝对路径。"""

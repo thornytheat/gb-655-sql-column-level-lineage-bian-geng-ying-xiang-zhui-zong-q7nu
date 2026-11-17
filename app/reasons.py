@@ -53,6 +53,20 @@ CODES: dict[str, tuple[str, str]] = {
     "COMPATIBLE": ("兼容", "info"),
     "COMPATIBLE_BY_MAPPING": ("加别名后兼容", "warn"),
     "BREAKING": ("破坏", "break"),
+    # 执行交接
+    "HANDOFF_STALE": ("交接版本过期", "break"),
+    "HANDOFF_RECALLED": ("整单已撤回", "warn"),
+    "ALREADY_CLAIMED": ("任务已被领取", "warn"),
+    "ALREADY_RECALLED": ("整单已撤回过", "warn"),
+    "TASK_STATE": ("任务状态不允许该动作", "warn"),
+    "IDEMPOTENCY_CONFLICT": ("幂等键改作他用", "warn"),
+    "CREDENTIAL_INVALID": ("凭据与签发记录不符", "warn"),
+    "CREDENTIAL_PURPOSE": ("凭据用途不符", "warn"),
+    "CREDENTIAL_MANIFEST_MISMATCH": ("凭据绑定清单已变化", "break"),
+    "CREDENTIAL_SUPERSEDED": ("凭据已被重新领取覆盖", "warn"),
+    "CREDENTIAL_EXPIRED": ("凭据已过期", "warn"),
+    "RECEIPT_STATE": ("任务状态不接受回执", "warn"),
+    "COMPENSATION_MISSING": ("补偿任务缺失", "break"),
 }
 
 # 类型收窄细分，挂在明细里，不进码表
